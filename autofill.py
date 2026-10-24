@@ -284,6 +284,32 @@ def fill_field(scope, field, value):
         raise ValueError(f"未知欄位類型：{kind}")
 
 
+# ---------- 儲存 ----------
+
+SUBMIT_NAMES = ["儲存", "存檔", "確定", "送出", "新增", "確認"]
+
+
+def click_submit(frame, scope, cfg):
+    """按下儲存鈕，回傳按到的按鈕文字；都找不到回傳 None。"""
+    first = cfg.get("submit_text")
+    names = ([first] if isinstance(first, str) else list(first or [])) + SUBMIT_NAMES
+    for where in (scope, frame):  # 先找跳出視窗裡，再找整頁
+        for name in dict.fromkeys(names):
+            for loc in (
+                where.get_by_role("button", name=name, exact=True),
+                where.locator("a, .btn, input[type=button], input[type=submit]").filter(has_text=re.compile(rf"^\s*{name}\s*$")),
+                where.locator(f"input[type=button][value='{name}'], input[type=submit][value='{name}']"),
+            ):
+                try:
+                    vis = [b for b in loc.all() if b.is_visible()]
+                except Exception:
+                    continue
+                if vis:
+                    vis[-1].click()
+                    return name
+    return None
+
+
 # ---------- fill ----------
 
 def cmd_fill(cfg, csv_path, auto_submit):
@@ -358,11 +384,16 @@ def cmd_fill(cfg, csv_path, auto_submit):
                 log.writerow([n, seat, "跳過", "請手動關掉跳出視窗"])
                 wait_enter("請在瀏覽器關掉跳出視窗，再按 Enter 繼續… ")
                 continue
-            scope.get_by_role("button", name=cfg["submit_text"]).last.click()
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(1000)
-            print(f"{tag} 已儲存")
-            log.writerow([n, seat, "已儲存", ""])
+            clicked = click_submit(frame, scope, cfg)
+            if clicked:
+                page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(1500)
+                print(f"{tag} 已按「{clicked}」")
+                log.writerow([n, seat, "已儲存", clicked])
+            else:
+                print(f"{tag} 找不到儲存按鈕。")
+                wait_enter("請你在瀏覽器自己按儲存，存好後回到這裡按 Enter 繼續下一筆… ")
+                log.writerow([n, seat, "手動儲存", ""])
         ctx.close()
     print(f"\n完成，紀錄檔：{log_path}")
 
