@@ -1,79 +1,60 @@
-# 新北市校務系統｜輔導紀錄自動填報
+# 新北市校務系統｜親師訪談紀錄填報機器人
 
 📺 **圖解使用說明＋示範影片**：<https://claude.ai/artifact/4kfx1xFMjWSBud9SJgf4Br>
 
-這是一個「自動化機器人」：它會開啟瀏覽器，自己移動滑鼠、點「新增」、逐格打字、勾選項目，
-把 Excel 裡的輔導紀錄一筆一筆填進新北市校務系統
-（<https://esa.ntpc.edu.tw/module/sso2/module/sso2/login-page25/init>）。
+這是一個「自動化機器人」：它會開啟瀏覽器，用座號選單切換學生、核對姓名、按「新增紀錄」，
+再自己點選訪談方式、逐格打字，把 Excel 裡的親師訪談紀錄一筆一筆填進新北市校務系統。
 
 ![機器人示範（模擬表單）](docs/demo.gif)
 
-- **登入由你自己手動完成**（帳號 → 繼續 → 密碼／驗證），程式不讀取也不儲存帳密。
-  登入狀態保存在本機 `browser-profile/` 資料夾，下次通常不用再登入。
-- 預設**每一筆都會停下來讓你在瀏覽器檢查**，按 Enter 才送出。
-- 學生資料（`records.csv`）、設定（`config.json`）、登入狀態、執行紀錄都已列入 `.gitignore`，不會被上傳。
+- **登入由你自己完成**，程式不讀取也不儲存帳密。登入狀態存在本機 `browser-profile/`。
+- **不會填錯人**：每筆都先核對畫面上的「05號 姓名」和 Excel 是否一致，不一致就跳過不填。
+- **每一筆都會停下來讓你檢查**，按 Enter 才儲存。
+- 學生資料（`records.csv`）、登入狀態、執行紀錄都列入 `.gitignore`，不會被上傳。
 
 ## 一、安裝（只需一次）
 
 1. 安裝 Python 3.9 以上（<https://www.python.org/downloads/>，安裝時勾選 *Add python.exe to PATH*）。
 2. 在本頁按綠色 **Code → Download ZIP**，解壓縮；打開資料夾，在網址列輸入 `cmd` 按 Enter 開啟命令視窗。
-3. 在命令視窗執行（會 git 的話也可以用 `git clone`）：
+3. 在命令視窗執行：
 
 ```bash
 pip install -r requirements.txt
 python -m playwright install chromium
-copy config.example.json config.json      # macOS / Linux 用 cp
+copy config.example.json config.json
 ```
 
-## 二、登入並找到填報頁
+## 二、準備 Excel
 
-```bash
-python autofill.py login
-```
+照 `records.example.csv` 的格式，一列是一筆訪談紀錄（同一位學生訪談多次就寫多列）：
 
-1. 在跳出的瀏覽器中登入。
-2. 點進「輔導紀錄」→「新增」的那一頁。
-3. 回到終端機按 Enter，畫面會印出目前網址 → 貼到 `config.json` 的 `form_url`。
+| 座號 | 姓名 | 訪談方式 | 訪談對象 | 訪談日期 | 輔導內容要點 | 聯絡事項 |
+|---|---|---|---|---|---|---|
+| 1 | 王小明 | 電話 | 母親 | 115-10-20 | … | … |
 
-## 三、讀取表單欄位、調整 config.json
+- **訪談方式**：本人對談、電話、聯絡簿、家長來訪、家庭訪問、通訊軟體、其他。
+  寫別的文字（例如「LINE群組」）會自動選「其他」並把文字填進「其他」欄。
+- **訪談日期**：照系統小日曆選完後顯示的格式寫（例如 `115-10-20`）。
+- **姓名**用來核對，建議一定要填。
+- 存檔選 **CSV UTF-8（逗號分隔）**，檔名 `records.csv`，放在同一個資料夾。
 
-```bash
-python autofill.py inspect
-```
-
-會產生 `fields.txt`，列出頁面上每個欄位的名稱、類型、下拉選項（**不含學生資料**）。
-依此修改 `config.json` 的 `fields`：
-
-| 欄位 | 說明 |
-|---|---|
-| `column` | CSV 的欄名 |
-| `label` | 畫面上欄位旁邊的文字（程式用它找欄位） |
-| `selector` | 若用 `label` 找不到，改填 CSS 選擇器，例如 `input[formcontrolname=studentNo]` |
-| `type` | `text`、`date`、`select`（下拉）、`radio`（單選）、`checkbox`（複選，CSV 內用「、」分隔） |
-
-- `before_fill`：每筆開始前要先點的按鈕，例如「新增」；不需要就設成 `[]`。
-- `submit_text`：儲存按鈕上的文字。
-
-> 不確定怎麼改？把 `fields.txt` 貼給 Claude 就能幫你產生 config.json。
-
-## 四、準備資料並填報
-
-照 `records.example.csv` 的格式建立 `records.csv`（Excel 另存為「CSV UTF-8」）。
-欄名需與 `config.json` 的 `column` 一致；選項文字要和系統畫面完全相同。
+## 三、開始填
 
 ```bash
 python autofill.py fill records.csv --slow
 ```
 
-`--slow`（慢速模式）會放慢動作、顯示紅點游標並逐字打字，看得清楚機器人在做什麼；熟悉後拿掉就會快很多。
+1. 跳出的瀏覽器裡**自己登入**。
+2. 點到「輔導資料」，再**點進任一位學生**（看到「上一位｜座號選單｜下一位｜＋新增紀錄」那頁）。
+3. 回黑色視窗按 **Enter**，機器人開始接手。
 
-每筆填好後：**Enter** = 送出、**s** = 跳過、**q** = 結束。
-執行結果會記錄在 `logs/`（只記列號、第一個欄位、結果）。
-
-確認流程都正確後，才考慮用 `--auto-submit` 不逐筆確認直接送出。
+每筆填好後：**Enter** = 儲存、**s** = 跳過、**q** = 結束。
+`--slow` 會放慢動作、顯示紅點游標；熟悉後拿掉就會快很多。
+執行結果記錄在 `logs/`（只記列號、座號、結果）。
 
 ## 常見問題
 
-- **出現「登入已失效」**：重新執行 `python autofill.py login`。
-- **某欄位填寫失敗**：該欄的 `label` 對不到，改用 `selector`（從 `fields.txt` 的 `name`／`id`／`formcontrolname` 組出來）。
-- **表單在 iframe 裡**：`fields.txt` 會顯示多個 frame；請告訴 Claude，需要調整程式。
+- **「找不到座號選單」**：按 Enter 時畫面要停在學生的輔導資料頁，不是班級列表。
+- **某個欄位沒填進去**：執行 `python autofill.py inspect`，登入後點進學生、按「新增紀錄」讓視窗開著，
+  回黑色視窗按 Enter，把產生的 `fields.txt` 貼給 Claude（檔案裡不含學生姓名）。
+- **儲存按鈕不是「儲存」**：改 `config.json` 的 `submit_text`。

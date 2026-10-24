@@ -1,22 +1,26 @@
-"""新北市校務系統 — 輔導紀錄自動填報
+"""新北市校務系統 — 親師訪談紀錄自動填報機器人
 
 用法：
-  python autofill.py login              # 開瀏覽器，自己手動登入（含驗證碼/OTP），登入狀態會保留
-  python autofill.py inspect            # 列出 form_url 頁面上所有欄位，存成 fields.txt，用來設定 config.json
-  python autofill.py fill records.csv   # 逐筆填入，每筆停下來讓你檢查，再由你決定是否送出
-  python autofill.py fill records.csv --auto-submit   # 檢查過幾筆、確認無誤後才用：自動按儲存
+  python autofill.py fill records.csv           # 逐筆填入，每筆停下來讓你檢查，按 Enter 才儲存
+  python autofill.py fill records.csv --slow    # 慢速模式：看得到滑鼠移動、逐字打字
+  python autofill.py inspect                    # 列出目前畫面上的欄位（欄位對不上時用）
 
-帳號密碼不會被這支程式讀取或儲存；登入狀態存在本機 browser-profile/ 資料夾。
+流程：機器人開瀏覽器 → 你自己登入，點進任一位學生的「輔導資料」頁（有上一位／下一位那頁）
+→ 回黑色視窗按 Enter → 機器人用座號下拉選單切換學生、核對姓名、按「新增紀錄」、填表。
+
+這個系統登入後網址列不會變，功能頁是嵌在頁面裡的，所以機器人是在「目前畫面」上找欄位，
+而不是用網址開頁。帳號密碼不會被讀取或儲存；登入狀態存在本機 browser-profile/。
 """
 
 import argparse
 import csv
 import datetime as dt
 import json
+import re
 import sys
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
 PROFILE_DIR = HERE / "browser-profile"
@@ -35,11 +39,18 @@ addEventListener('DOMContentLoaded', () => {
 });
 """
 
+# 學生下拉選單的選項長這樣：「01 王小明」
+STUDENT_OPTION = re.compile(r"^\s*\d{1,2}\s+\S")
+
+
+class StopRow(Exception):
+    """這一筆不能填（找不到學生、姓名不符…），跳過並記錄。"""
+
 
 def load_config(path):
     p = Path(path)
     if not p.exists():
-        sys.exit(f"找不到 {p.name}，請先複製 config.example.json 為 config.json 再修改。")
+        sys.exit(f"找不到 {p.name}，請先執行：copy config.example.json config.json")
     return json.loads(p.read_text(encoding="utf-8"))
 
 
@@ -54,7 +65,7 @@ def read_records(path):
             continue
     else:
         sys.exit("無法辨識 CSV 編碼，請在 Excel 另存為「CSV UTF-8」。")
-    return list(csv.DictReader(text.splitlines()))
+    return [r for r in csv.DictReader(text.splitlines()) if any((v or "").strip() for v in r.values())]
 
 
 def open_browser(p):
@@ -75,190 +86,255 @@ def wait_enter(msg):
         return "q"
 
 
-# ---------- login ----------
+def all_frames(ctx):
+    for pg in reversed(ctx.pages):  # 新開的分頁優先
+        for fr in pg.frames:
+            yield pg, fr
 
-def cmd_login(cfg):
-    with sync_playwright() as p:
+
+def find_student_frame(ctx):
+    """找出含有座號下拉選單的那一頁（可能在 iframe 裡）。"""
+    for pg, fr in all_frames(ctx):
+        try:
+            for sel in fr.locator("select").all():
+                opts = sel.locator("option").all_inner_texts()
+                if sum(bool(STUDENT_OPTION.match(o)) for o in opts) >= 2:
+                    return pg, fr, sel
+        except Exception:
+            continue
+    return None, None, None
+
+
+# ---------- 選學生 ----------
+
+def go_to_student(page, frame, select, seat, name):
+    seat_n = int(seat)
+    opts = select.locator("option").all_inner_texts()
+    target = next((o for o in opts if re.match(rf"^\s*0*{seat_n}\s", o)), None)
+    if target is None:
+        raise StopRow(f"下拉選單裡找不到座號 {seat_n}")
+    if name and name not in target:
+        raise StopRow(f"座號 {seat_n} 在系統是「{target.strip()}」，和 Excel 的「{name}」不符")
+    current = select.evaluate("s => s.options[s.selectedIndex] && s.options[s.selectedIndex].text")
+    if (current or "").strip() != target.strip():
+        select.select_option(label=target)
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(800)
+    # 切換後畫面上要看到「05號 王小明」才算到對的人
+    header = f"{seat_n:02d}號"
+    try:
+        frame.get_by_text(re.compile(rf"0*{seat_n}號")).first.wait_for(timeout=8000)
+    except Exception:
+        raise StopRow(f"切換後畫面上沒有出現「{header}」")
+    if name:
+        body = frame.locator("body").inner_text()
+        if not re.search(rf"0*{seat_n}號\s*{re.escape(name)}", body):
+            raise StopRow(f"畫面上不是「{header} {name}」，停止填寫")
+
+
+# ---------- 填欄位 ----------
+
+def dialog_scope(frame, title):
+    """新增紀錄的跳出視窗；找不到就用整頁。"""
+    for css in (".modal.show", ".modal.in", ".modal[style*='block']", "[role=dialog]"):
+        loc = frame.locator(css).filter(has_text=title)
+        if loc.count():
+            return loc.last
+    return frame.locator("body")
+
+
+def locate(scope, field):
+    if field.get("selector"):
+        return scope.locator(field["selector"]).first
+    if field.get("placeholder"):
+        return scope.get_by_placeholder(field["placeholder"]).first
+    # 「訪談日期：」這類標題後面的第一個輸入框
+    label = field.get("near") or field["column"]
+    return scope.locator(
+        f"xpath=.//*[starts-with(normalize-space(text()), '{label}')]/following::*[self::input or self::textarea][1]"
+    ).first
+
+
+def type_into(el, value):
+    if SLOW:
+        el.click()
+        el.fill("")
+        el.press_sequentially(value, delay=40)  # 一個字一個字打
+    else:
+        el.fill(value)
+
+
+def fill_field(scope, field, value):
+    kind = field.get("type", "text")
+    if not value:
+        return
+    if kind == "text":
+        el = locate(scope, field)
+        type_into(el, value)
+        el.dispatch_event("change")
+    elif kind == "date":
+        el = locate(scope, field)
+        el.click()
+        if el.get_attribute("readonly") is not None:
+            # 只能用小日曆選的欄位：直接寫入值
+            el.evaluate(
+                "(e, v) => { e.value = v; ['input','change','blur'].forEach(t => e.dispatchEvent(new Event(t, {bubbles:true}))); }",
+                value,
+            )
+        else:
+            el.fill(value)
+            el.dispatch_event("change")
+        el.press("Escape")  # 關掉小日曆
+    elif kind == "radio":
+        options = field.get("options", [])
+        other = field.get("other_option")
+        if options and value not in options and other:
+            # 不在選項裡的，選「其他」再把文字填進「其他」欄
+            pick, extra = other, value
+        else:
+            pick, extra = value, None
+        try:
+            scope.get_by_role("radio", name=pick, exact=True).first.check(timeout=2000)
+        except Exception:
+            scope.get_by_text(pick, exact=True).first.click()
+        if extra and field.get("other_placeholder"):
+            type_into(scope.get_by_placeholder(field["other_placeholder"]).first, extra)
+    elif kind == "select":
+        locate(scope, field).select_option(label=value)
+    else:
+        raise ValueError(f"未知欄位類型：{kind}")
+
+
+# ---------- fill ----------
+
+def cmd_fill(cfg, csv_path, auto_submit):
+    records = read_records(csv_path)
+    if not records:
+        sys.exit("CSV 沒有資料。")
+    need = [cfg["seat_column"]] + [f["column"] for f in cfg["fields"]]
+    missing = [c for c in need if c not in records[0]]
+    if missing:
+        sys.exit(f"CSV 缺少欄位：{', '.join(missing)}（第一列標題要和 records.example.csv 一樣）")
+
+    LOG_DIR.mkdir(exist_ok=True)
+    log_path = LOG_DIR / f"fill-{dt.datetime.now():%Y%m%d-%H%M%S}.csv"
+    seat_col, name_col = cfg["seat_column"], cfg.get("name_column", "")
+
+    with sync_playwright() as p, open(log_path, "w", newline="", encoding="utf-8-sig") as logf:
+        log = csv.writer(logf)
+        log.writerow(["列", "座號", "結果", "訊息"])
         ctx, page = open_browser(p)
         page.goto(cfg["login_url"])
-        print("請在開啟的瀏覽器中手動登入，並點到「新增輔導紀錄」的頁面。")
-        wait_enter("完成後回到這裡按 Enter… ")
-        # 系統常把功能開在新分頁，所以每個分頁都列出來
-        print("\n目前開著的分頁：")
-        for i, pg in enumerate(ctx.pages, start=1):
-            print(f"  {i}. {pg.title()}\n     {pg.url}")
-        print("請把「新增輔導紀錄」那一頁的網址貼到 config.json 的 form_url。")
+        print("1. 在跳出的瀏覽器登入（帳號密碼請自己輸入）。")
+        print("2. 點進任一位學生的「輔導資料」頁（上方有 上一位／座號選單／下一位）。")
+        if wait_enter("3. 好了之後回到這裡按 Enter（輸入 q 離開）… ") == "q":
+            ctx.close()
+            return
+        page, frame, _ = find_student_frame(ctx)
+        if frame is None:
+            ctx.close()
+            sys.exit("找不到座號選單。請確認畫面停在學生的輔導資料頁，再重新執行。")
+        print(f"找到學生頁，共 {len(records)} 筆要填。\n")
+
+        for n, row in enumerate(records, start=2):  # 第 1 列是標題
+            seat = (row.get(seat_col) or "").strip()
+            name = (row.get(name_col) or "").strip() if name_col else ""
+            tag = f"[第 {n} 列 {seat}號 {name}]"
+            try:
+                if not seat.isdigit():
+                    raise StopRow("座號不是數字")
+                # 每筆重新找一次：存檔後頁面可能重新載入
+                page, frame, select = find_student_frame(ctx)
+                if frame is None:
+                    raise StopRow("畫面上找不到座號選單（是否被登出或跳離學生頁？）")
+                go_to_student(page, frame, select, seat, name)
+                frame.get_by_text(cfg["add_button_text"]).first.click()
+                scope = dialog_scope(frame, cfg["dialog_title"])
+                scope.get_by_text(cfg["dialog_title"]).first.wait_for(timeout=8000)
+                for field in cfg["fields"]:
+                    fill_field(scope, field, (row.get(field["column"]) or "").strip())
+            except Exception as e:
+                msg = str(e).splitlines()[0]
+                print(f"{tag} 沒有填：{msg}")
+                log.writerow([n, seat, "未填", msg])
+                if wait_enter("請在瀏覽器關掉跳出視窗（若有），按 Enter 繼續下一筆，輸入 q 結束… ") == "q":
+                    break
+                continue
+
+            if auto_submit:
+                ans = ""
+            else:
+                ans = wait_enter(f"{tag} 已填好，請在瀏覽器檢查。Enter=按「{cfg['submit_text']}」，s=跳過，q=結束：")
+            if ans == "q":
+                log.writerow([n, seat, "未送出", "使用者結束"])
+                break
+            if ans == "s":
+                log.writerow([n, seat, "跳過", "請手動關掉跳出視窗"])
+                wait_enter("請在瀏覽器關掉跳出視窗，再按 Enter 繼續… ")
+                continue
+            scope.get_by_role("button", name=cfg["submit_text"]).last.click()
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(1000)
+            print(f"{tag} 已儲存")
+            log.writerow([n, seat, "已儲存", ""])
         ctx.close()
+    print(f"\n完成，紀錄檔：{log_path}")
 
 
 # ---------- inspect ----------
 
 INSPECT_JS = """
-() => {
-  const labelOf = el => {
-    if (el.id) { const l = document.querySelector(`label[for="${el.id}"]`); if (l) return l.innerText.trim(); }
-    const wrap = el.closest('label'); if (wrap) return wrap.innerText.trim();
-    if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
-    // 表格式表單：同一列的 th / 前一格
-    const td = el.closest('td'); if (td) {
-      const prev = td.previousElementSibling; if (prev) return prev.innerText.trim();
-      const th = td.parentElement && td.parentElement.querySelector('th'); if (th) return th.innerText.trim();
-    }
-    return '';
-  };
-  return [...document.querySelectorAll('input, select, textarea, [role=combobox], mat-select')]
-    .filter(e => e.type !== 'hidden')
-    .map(e => ({
+() => [...document.querySelectorAll('input, select, textarea, button')]
+  .filter(e => e.type !== 'hidden' && e.offsetParent !== null)
+  .map(e => {
+    const opts = e.tagName === 'SELECT' ? [...e.options].map(o => o.text.trim()) : [];
+    // 學生名單的選項含姓名，不列出來
+    const isStudents = opts.filter(t => /^\\d{1,2}\\s+\\S/.test(t)).length >= 2;
+    return {
       tag: e.tagName.toLowerCase(), type: e.type || '', name: e.name || '', id: e.id || '',
-      formcontrolname: e.getAttribute('formcontrolname') || '', label: labelOf(e),
-      placeholder: e.placeholder || '', value_text: e.tagName === 'SELECT' ? [...e.options].map(o => o.text).join(' | ') : '',
-    }));
-}
+      cls: (e.className || '').toString().slice(0, 60), placeholder: e.placeholder || '',
+      readonly: e.readOnly || false,
+      text: e.tagName === 'BUTTON' ? e.innerText.trim().slice(0, 20) : '',
+      radio_label: e.type === 'radio' ? ((e.closest('label') || e.parentElement).innerText.trim().slice(0, 20)) : '',
+      options: isStudents ? '(學生名單，略)' : opts.join(' | ').slice(0, 200),
+    };
+  })
 """
 
 
 def cmd_inspect(cfg):
     with sync_playwright() as p:
         ctx, page = open_browser(p)
-        page.goto(cfg["form_url"])
-        print("請在瀏覽器中把畫面停在要填的表單（必要時先按「新增」）。")
-        wait_enter("準備好後按 Enter… ")
-        lines = [f"URL: {page.url}"]
-        frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
-        for i, fr in enumerate(frames):
+        page.goto(cfg["login_url"])
+        print("請登入，點進學生頁並按「新增紀錄」，讓填寫視窗開著。")
+        wait_enter("準備好後回到這裡按 Enter… ")
+        lines = []
+        for i, (pg, fr) in enumerate(all_frames(ctx)):
             try:
                 items = fr.evaluate(INSPECT_JS)
             except Exception:
                 continue
-            if not items:
-                continue
-            lines.append(f"\n== frame {i}: {fr.url}")
-            for it in items:
-                lines.append(json.dumps(it, ensure_ascii=False))
-        buttons = page.locator("button, input[type=submit], input[type=button]").all_inner_texts()
-        lines.append("\n== buttons: " + " | ".join(b.strip() for b in buttons if b.strip()))
+            if items:
+                lines.append(f"\n== 分頁/框架 {i}: {fr.url}")
+                lines += [json.dumps(it, ensure_ascii=False) for it in items]
         (HERE / "fields.txt").write_text("\n".join(lines), encoding="utf-8")
-        print("已存成 fields.txt（只有欄位名稱，沒有學生資料），可依此修改 config.json。")
+        print("已存成 fields.txt（不含學生姓名），請用記事本打開，把內容貼給 Claude。")
         ctx.close()
-
-
-# ---------- fill ----------
-
-def locate(page, field):
-    if field.get("selector"):
-        return page.locator(field["selector"]).first
-    return page.get_by_label(field["label"], exact=False).first
-
-
-def fill_field(page, field, value):
-    kind = field.get("type", "text")
-    if value is None or value == "":
-        return
-    if kind in ("text", "date"):
-        el = locate(page, field)
-        if SLOW and kind == "text":  # 日期欄位逐字打會被瀏覽器拆格，仍一次填入
-            el.click()
-            el.fill("")
-            el.press_sequentially(value, delay=40)  # 一個字一個字打
-        else:
-            el.fill(value)
-        el.dispatch_event("change")
-        el.press("Tab")  # 讓 Angular 表單觸發驗證
-    elif kind == "select":
-        el = locate(page, field)
-        try:
-            el.select_option(label=value, timeout=2000)
-        except Exception:
-            # 非原生下拉（如 Angular Material）：點開再點選項
-            el.click()
-            page.get_by_role("option", name=value).first.click()
-    elif kind == "radio":
-        page.get_by_role("radio", name=value).first.check()
-    elif kind == "checkbox":
-        for v in [s.strip() for s in value.replace("、", ",").split(",") if s.strip()]:
-            page.get_by_role("checkbox", name=v).first.check()
-    else:
-        raise ValueError(f"未知欄位類型：{kind}")
-
-
-def run_steps(page, steps):
-    for s in steps or []:
-        if s["action"] == "click":
-            target = page.locator(s["selector"]) if s.get("selector") else page.get_by_text(s["text"], exact=True)
-            target.first.click()
-            page.wait_for_load_state("networkidle")
-
-
-def cmd_fill(cfg, csv_path, auto_submit):
-    records = read_records(csv_path)
-    if not records:
-        sys.exit("CSV 沒有資料。")
-    missing = [f["column"] for f in cfg["fields"] if f["column"] not in records[0]]
-    if missing:
-        sys.exit(f"CSV 缺少欄位：{', '.join(missing)}")
-
-    LOG_DIR.mkdir(exist_ok=True)
-    log_path = LOG_DIR / f"fill-{dt.datetime.now():%Y%m%d-%H%M%S}.csv"
-    key_col = cfg["fields"][0]["column"]
-
-    with sync_playwright() as p, open(log_path, "w", newline="", encoding="utf-8-sig") as logf:
-        log = csv.writer(logf)
-        log.writerow(["列", key_col, "結果", "訊息"])
-        ctx, page = open_browser(p)
-        for n, row in enumerate(records, start=2):  # 第 1 列是標題
-            tag = f"[第 {n} 列 {row.get(key_col, '')}]"
-            try:
-                page.goto(cfg["form_url"])
-                page.wait_for_load_state("networkidle")
-                if "sso" in page.url and "login" in page.url:
-                    print("登入已失效，請先執行：python autofill.py login")
-                    break
-                run_steps(page, cfg.get("before_fill"))
-                for field in cfg["fields"]:
-                    fill_field(page, field, row.get(field["column"], "").strip())
-            except (PWTimeout, Exception) as e:
-                print(f"{tag} 填寫失敗：{e}")
-                log.writerow([n, row.get(key_col, ""), "失敗", str(e).splitlines()[0]])
-                if wait_enter("按 Enter 跳過這筆，輸入 q 結束… ") == "q":
-                    break
-                continue
-
-            if auto_submit:
-                page.get_by_role("button", name=cfg["submit_text"]).first.click()
-                page.wait_for_load_state("networkidle")
-                print(f"{tag} 已送出")
-                log.writerow([n, row.get(key_col, ""), "已送出", ""])
-                continue
-
-            ans = wait_enter(f"{tag} 已填好，請在瀏覽器檢查。Enter=按「{cfg['submit_text']}」送出，s=跳過，q=結束：")
-            if ans == "q":
-                log.writerow([n, row.get(key_col, ""), "未送出", "使用者結束"])
-                break
-            if ans == "s":
-                log.writerow([n, row.get(key_col, ""), "跳過", ""])
-                continue
-            page.get_by_role("button", name=cfg["submit_text"]).first.click()
-            page.wait_for_load_state("networkidle")
-            log.writerow([n, row.get(key_col, ""), "已送出", ""])
-        ctx.close()
-    print(f"完成，紀錄檔：{log_path}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="新北市校務系統輔導紀錄自動填報")
-    ap.add_argument("command", choices=["login", "inspect", "fill"])
+    ap = argparse.ArgumentParser(description="新北市校務系統親師訪談紀錄自動填報")
+    ap.add_argument("command", choices=["fill", "inspect"])
     ap.add_argument("csv", nargs="?", help="fill 用的資料檔")
     ap.add_argument("--config", default=str(HERE / "config.json"))
-    ap.add_argument("--auto-submit", action="store_true", help="不逐筆確認，直接送出")
+    ap.add_argument("--auto-submit", action="store_true", help="不逐筆確認，直接儲存")
     ap.add_argument("--slow", action="store_true", help="慢速模式：看得到滑鼠移動與逐字輸入")
     args = ap.parse_args()
     global SLOW
     SLOW = args.slow
 
     cfg = load_config(args.config)
-    if args.command == "login":
-        cmd_login(cfg)
-    elif args.command == "inspect":
+    if args.command == "inspect":
         cmd_inspect(cfg)
     else:
         if not args.csv:
