@@ -92,24 +92,80 @@ def all_frames(ctx):
             yield pg, fr
 
 
+def option_texts(select):
+    # 用 textContent：被系統美化而隱藏起來的下拉選單也讀得到
+    return select.evaluate("s => [...s.options].map(o => o.textContent.trim())")
+
+
 def find_student_frame(ctx):
-    """找出含有座號下拉選單的那一頁（可能在 iframe 裡）。"""
+    """找出學生頁（可能在 iframe 或新分頁裡）。
+
+    優先用座號下拉選單；沒有標準下拉選單時，改用「上一位／下一位」按鈕切換（select 回傳 None）。
+    """
+    fallback = (None, None, None)
     for pg, fr in all_frames(ctx):
         try:
             for sel in fr.locator("select").all():
-                opts = sel.locator("option").all_inner_texts()
-                if sum(bool(STUDENT_OPTION.match(o)) for o in opts) >= 2:
+                if sum(bool(STUDENT_OPTION.match(o)) for o in option_texts(sel)) >= 2:
                     return pg, fr, sel
+            if fallback[1] is None and fr.get_by_text("下一位").count() and fr.get_by_text("上一位").count():
+                fallback = (pg, fr, None)
         except Exception:
             continue
-    return None, None, None
+    return fallback
+
+
+def diagnose(ctx):
+    """找不到學生頁時，印出每個分頁／框架的概況（姓名遮蔽）。"""
+    mask = lambda t: re.sub(r"[\u4e00-\u9fff]", "○", t)
+    print("\n--- 診斷資訊（請截圖給 Claude）---")
+    for i, (pg, fr) in enumerate(all_frames(ctx)):
+        try:
+            sels = fr.locator("select").all()
+            first = [mask(" / ".join(option_texts(x)[:2]))[:40] for x in sels[:3]]
+            nav = fr.get_by_text("下一位").count()
+            add = fr.get_by_text("新增紀錄").count()
+            print(f"[{i}] {fr.url[:90]}\n     下拉選單 {len(sels)} 個 {first}｜下一位 {nav}｜新增紀錄 {add}")
+        except Exception as e:
+            print(f"[{i}] {fr.url[:90]} 讀取失敗：{str(e).splitlines()[0][:60]}")
+    print("---------------------------------\n")
 
 
 # ---------- 選學生 ----------
 
+SEAT_ON_PAGE = re.compile(r"(\d{1,2})號")
+
+
+def current_seat(frame):
+    m = SEAT_ON_PAGE.search(frame.locator("body").inner_text())
+    return int(m.group(1)) if m else None
+
+
+def step_to_seat(page, frame, seat_n):
+    """沒有下拉選單時：一直按「下一位／上一位」直到畫面上是目標座號。"""
+    for _ in range(80):
+        cur = current_seat(frame)
+        if cur is None:
+            raise StopRow("畫面上讀不到目前的座號")
+        if cur == seat_n:
+            return
+        frame.get_by_text("下一位" if cur < seat_n else "上一位").first.click()
+        page.wait_for_load_state("networkidle")
+        for _ in range(40):  # 等座號變了
+            page.wait_for_timeout(250)
+            if current_seat(frame) != cur:
+                break
+        else:
+            raise StopRow(f"按了{'下一位' if cur < seat_n else '上一位'}，座號沒有改變（可能已到第一位或最後一位）")
+    raise StopRow(f"找不到座號 {seat_n}")
+
+
 def go_to_student(page, frame, select, seat, name):
     seat_n = int(seat)
-    opts = select.locator("option").all_inner_texts()
+    if select is None:
+        step_to_seat(page, frame, seat_n)
+        return verify_student(frame, seat_n, name)
+    opts = option_texts(select)
     target = next((o for o in opts if re.match(rf"^\s*0*{seat_n}\s", o)), None)
     if target is None:
         raise StopRow(f"下拉選單裡找不到座號 {seat_n}")
@@ -117,9 +173,21 @@ def go_to_student(page, frame, select, seat, name):
         raise StopRow(f"座號 {seat_n} 在系統是「{target.strip()}」，和 Excel 的「{name}」不符")
     current = select.evaluate("s => s.options[s.selectedIndex] && s.options[s.selectedIndex].text")
     if (current or "").strip() != target.strip():
-        select.select_option(label=target)
+        try:
+            select.select_option(label=target, timeout=3000)
+        except Exception:
+            # 下拉選單被美化隱藏了：直接設定值並通知頁面
+            select.evaluate(
+                "(s, t) => { const o = [...s.options].find(o => o.textContent.trim() === t);"
+                " s.value = o.value; s.dispatchEvent(new Event('change', {bubbles: true})); }",
+                target.strip(),
+            )
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(800)
+    verify_student(frame, seat_n, name)
+
+
+def verify_student(frame, seat_n, name):
     # 切換後畫面上要看到「05號 王小明」才算到對的人
     header = f"{seat_n:02d}號"
     try:
@@ -230,11 +298,18 @@ def cmd_fill(cfg, csv_path, auto_submit):
         if wait_enter("3. 好了之後回到這裡按 Enter（輸入 q 離開）… ") == "q":
             ctx.close()
             return
-        page, frame, _ = find_student_frame(ctx)
-        if frame is None:
-            ctx.close()
-            sys.exit("找不到座號選單。請確認畫面停在學生的輔導資料頁，再重新執行。")
-        print(f"找到學生頁，共 {len(records)} 筆要填。\n")
+        while True:
+            page, frame, select = find_student_frame(ctx)
+            if frame is not None:
+                break
+            print("\n找不到學生頁（座號選單或上一位／下一位按鈕）。")
+            diagnose(ctx)
+            print("請確認瀏覽器畫面停在某位學生的頁面（看得到「上一位」「下一位」「新增紀錄」），")
+            if wait_enter("再按 Enter 重試，輸入 q 離開… ") == "q":
+                ctx.close()
+                return
+        how = "座號選單" if select is not None else "上一位／下一位按鈕"
+        print(f"找到學生頁（用{how}切換學生），共 {len(records)} 筆要填。\n")
 
         for n, row in enumerate(records, start=2):  # 第 1 列是標題
             seat = (row.get(seat_col) or "").strip()
