@@ -1,7 +1,12 @@
 # 新北市校務系統｜輔導紀錄自動填報
 
-把整理在 Excel／CSV 裡的輔導紀錄，自動逐筆填進新北市校務系統
+📺 **圖解使用說明＋示範影片**：<https://claude.ai/artifact/4kfx1xFMjWSBud9SJgf4Br>
+
+這是一個「自動化機器人」：它會開啟瀏覽器，自己移動滑鼠、點「新增」、逐格打字、勾選項目，
+把 Excel 裡的輔導紀錄一筆一筆填進新北市校務系統
 （<https://esa.ntpc.edu.tw/module/sso2/module/sso2/login-page25/init>）。
+
+![機器人示範（模擬表單）](docs/demo.gif)
 
 - **登入由你自己手動完成**（帳號 → 繼續 → 密碼／驗證），程式不讀取也不儲存帳密。
   登入狀態保存在本機 `browser-profile/` 資料夾，下次通常不用再登入。
@@ -10,11 +15,11 @@
 
 ## 一、安裝（只需一次）
 
-需要 Python 3.9 以上（Windows 可從 <https://www.python.org/downloads/> 安裝，記得勾選 *Add to PATH*）。
+1. 安裝 Python 3.9 以上（<https://www.python.org/downloads/>，安裝時勾選 *Add python.exe to PATH*）。
+2. 在本頁按綠色 **Code → Download ZIP**，解壓縮；打開資料夾，在網址列輸入 `cmd` 按 Enter 開啟命令視窗。
+3. 在命令視窗執行（會 git 的話也可以用 `git clone`）：
 
 ```bash
-git clone https://github.com/335588yyyti/schooltake.git
-cd schooltake
 pip install -r requirements.txt
 python -m playwright install chromium
 copy config.example.json config.json      # macOS / Linux 用 cp
@@ -57,8 +62,10 @@ python autofill.py inspect
 欄名需與 `config.json` 的 `column` 一致；選項文字要和系統畫面完全相同。
 
 ```bash
-python autofill.py fill records.csv
+python autofill.py fill records.csv --slow
 ```
+
+`--slow`（慢速模式）會放慢動作、顯示紅點游標並逐字打字，看得清楚機器人在做什麼；熟悉後拿掉就會快很多。
 
 每筆填好後：**Enter** = 送出、**s** = 跳過、**q** = 結束。
 執行結果會記錄在 `logs/`（只記列號、第一個欄位、結果）。

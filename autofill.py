@@ -21,6 +21,19 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 HERE = Path(__file__).resolve().parent
 PROFILE_DIR = HERE / "browser-profile"
 LOG_DIR = HERE / "logs"
+SLOW = False  # --slow：放慢動作並顯示滑鼠游標，方便看機器人在做什麼
+
+# 在頁面上畫出紅點游標，跟著機器人的滑鼠移動
+CURSOR_JS = """
+addEventListener('DOMContentLoaded', () => {
+  const d = document.createElement('div');
+  d.style.cssText = 'position:fixed;z-index:2147483647;width:18px;height:18px;margin:-9px 0 0 -9px;'
+    + 'border-radius:50%;background:rgba(230,40,40,.75);box-shadow:0 0 0 4px rgba(230,40,40,.25);'
+    + 'pointer-events:none;left:-50px;top:-50px;transition:left .15s,top .15s';
+  document.body.appendChild(d);
+  addEventListener('mousemove', e => { d.style.left = e.clientX + 'px'; d.style.top = e.clientY + 'px'; }, true);
+});
+"""
 
 
 def load_config(path):
@@ -46,8 +59,11 @@ def read_records(path):
 
 def open_browser(p):
     ctx = p.chromium.launch_persistent_context(
-        str(PROFILE_DIR), headless=False, viewport={"width": 1366, "height": 860}
+        str(PROFILE_DIR), headless=False, viewport={"width": 1366, "height": 860},
+        slow_mo=300 if SLOW else 0,
     )
+    if SLOW:
+        ctx.add_init_script(CURSOR_JS)
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     return ctx, page
 
@@ -137,7 +153,12 @@ def fill_field(page, field, value):
         return
     if kind in ("text", "date"):
         el = locate(page, field)
-        el.fill(value)
+        if SLOW and kind == "text":  # 日期欄位逐字打會被瀏覽器拆格，仍一次填入
+            el.click()
+            el.fill("")
+            el.press_sequentially(value, delay=40)  # 一個字一個字打
+        else:
+            el.fill(value)
         el.dispatch_event("change")
         el.press("Tab")  # 讓 Angular 表單觸發驗證
     elif kind == "select":
@@ -226,7 +247,10 @@ def main():
     ap.add_argument("csv", nargs="?", help="fill 用的資料檔")
     ap.add_argument("--config", default=str(HERE / "config.json"))
     ap.add_argument("--auto-submit", action="store_true", help="不逐筆確認，直接送出")
+    ap.add_argument("--slow", action="store_true", help="慢速模式：看得到滑鼠移動與逐字輸入")
     args = ap.parse_args()
+    global SLOW
+    SLOW = args.slow
 
     cfg = load_config(args.config)
     if args.command == "login":
