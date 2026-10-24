@@ -57,4 +57,4 @@ python autofill.py fill records.csv --slow
 - **「找不到座號選單」**：按 Enter 時畫面要停在學生的輔導資料頁，不是班級列表。
 - **某個欄位沒填進去**：執行 `python autofill.py inspect`，登入後點進學生、按「新增紀錄」讓視窗開著，
   回黑色視窗按 Enter，把產生的 `fields.txt` 貼給 Claude（檔案裡不含學生姓名）。
-- **儲存按鈕不是「儲存」**：改 `config.json` 的 `submit_text`。
+- **儲存按鈕名稱不同（目前設定「存檔」）**：改 `config.json` 的 `submit_text`。

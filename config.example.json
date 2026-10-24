@@ -4,7 +4,7 @@
   "name_column": "姓名",
   "add_button_text": "新增紀錄",
   "dialog_title": "新增親師訪談紀錄",
-  "submit_text": "儲存",
+  "submit_text": "存檔",
   "fields": [
     { "column": "訪談方式", "type": "radio",
       "options": ["本人對談", "電話", "聯絡簿", "家長來訪", "家庭訪問", "通訊軟體", "其他"],
