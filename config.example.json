@@ -1,0 +1,16 @@
+{
+  "login_url": "https://esa.ntpc.edu.tw/module/sso2/module/sso2/login-page25/init",
+  "form_url": "（執行 login 後，把「新增輔導紀錄」頁面的網址貼在這裡）",
+  "before_fill": [
+    { "action": "click", "text": "新增" }
+  ],
+  "fields": [
+    { "column": "學號",     "label": "學號",     "type": "text" },
+    { "column": "輔導日期", "label": "輔導日期", "type": "date" },
+    { "column": "輔導方式", "label": "輔導方式", "type": "select" },
+    { "column": "問題類別", "label": "問題類別", "type": "checkbox" },
+    { "column": "內容摘要", "label": "內容摘要", "type": "text" },
+    { "column": "後續處理", "label": "後續處理", "type": "radio" }
+  ],
+  "submit_text": "儲存"
+}

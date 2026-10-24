@@ -1,0 +1,7 @@
+# 個資與登入狀態絕對不要進 git
+records.csv
+*.xlsx
+config.json
+fields.txt
+browser-profile/
+logs/
