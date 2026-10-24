@@ -13,7 +13,8 @@
 需要 Python 3.9 以上（Windows 可從 <https://www.python.org/downloads/> 安裝，記得勾選 *Add to PATH*）。
 
 ```bash
-cd ntpc-counseling-autofill
+git clone https://github.com/335588yyyti/schooltake.git
+cd schooltake
 pip install -r requirements.txt
 python -m playwright install chromium
 copy config.example.json config.json      # macOS / Linux 用 cp
