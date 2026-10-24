@@ -41,6 +41,7 @@ addEventListener('DOMContentLoaded', () => {
 
 # 學生下拉選單的選項長這樣：「01 王小明」
 STUDENT_OPTION = re.compile(r"^\s*\d{1,2}\s+\S")
+FIND_ERRORS = []  # 找學生頁時遇到的錯誤，診斷時印出
 
 
 class StopRow(Exception):
@@ -102,16 +103,21 @@ def find_student_frame(ctx):
 
     優先用座號下拉選單；沒有標準下拉選單時，改用「上一位／下一位」按鈕切換（select 回傳 None）。
     """
-    fallback = (None, None, None)
-    for pg, fr in all_frames(ctx):
-        try:
-            for sel in fr.locator("select").all():
-                if sum(bool(STUDENT_OPTION.match(o)) for o in option_texts(sel)) >= 2:
-                    return pg, fr, sel
-            if fallback[1] is None and fr.get_by_text("下一位").count() and fr.get_by_text("上一位").count():
-                fallback = (pg, fr, None)
-        except Exception:
-            continue
+    FIND_ERRORS.clear()
+    for attempt in range(5):  # 頁面可能還在載入，多試幾次
+        fallback = (None, None, None)
+        for pg, fr in list(all_frames(ctx)):
+            try:
+                for sel in fr.locator("select").all():
+                    if sum(bool(STUDENT_OPTION.match(o)) for o in option_texts(sel)) >= 2:
+                        return pg, fr, sel
+                if fallback[1] is None and fr.get_by_text("下一位").count() and fr.get_by_text("上一位").count():
+                    fallback = (pg, fr, None)
+            except Exception as e:
+                FIND_ERRORS.append(f"{fr.url[:60]}：{type(e).__name__} {str(e).splitlines()[0][:100]}")
+        if fallback[1] is not None:
+            return fallback
+        ctx.pages[-1].wait_for_timeout(1000)
     return fallback
 
 
@@ -123,11 +129,16 @@ def diagnose(ctx):
         try:
             sels = fr.locator("select").all()
             first = [mask(" / ".join(option_texts(x)[:2]))[:40] for x in sels[:3]]
+            hits = [sum(bool(STUDENT_OPTION.match(o)) for o in option_texts(x)) for x in sels]
+            first.append(f"符合座號格式：{hits}")
+            first.append(repr(option_texts(sels[0])[0][:4]) if sels and option_texts(sels[0]) else "")
             nav = fr.get_by_text("下一位").count()
             add = fr.get_by_text("新增紀錄").count()
             print(f"[{i}] {fr.url[:90]}\n     下拉選單 {len(sels)} 個 {first}｜下一位 {nav}｜新增紀錄 {add}")
         except Exception as e:
             print(f"[{i}] {fr.url[:90]} 讀取失敗：{str(e).splitlines()[0][:60]}")
+    for err in FIND_ERRORS[-5:]:
+        print("  錯誤：" + err)
     print("---------------------------------\n")
 
 
