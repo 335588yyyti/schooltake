@@ -83,8 +83,11 @@ def cmd_login(cfg):
         page.goto(cfg["login_url"])
         print("請在開啟的瀏覽器中手動登入，並點到「新增輔導紀錄」的頁面。")
         wait_enter("完成後回到這裡按 Enter… ")
-        print(f"\n目前網址：{page.url}")
-        print("若這就是填報頁，請把它貼到 config.json 的 form_url。")
+        # 系統常把功能開在新分頁，所以每個分頁都列出來
+        print("\n目前開著的分頁：")
+        for i, pg in enumerate(ctx.pages, start=1):
+            print(f"  {i}. {pg.title()}\n     {pg.url}")
+        print("請把「新增輔導紀錄」那一頁的網址貼到 config.json 的 form_url。")
         ctx.close()
 
 
